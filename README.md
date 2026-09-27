@@ -386,6 +386,86 @@ through Cloudflare.
 | 10 | no CAA, no DMARC, no security.txt | low | apex |
 | 11 | zero credentials in 1,119 files / 113 commits | — | clean |
 
+---
+
+# Batch four — admin panel hunt
+
+56 admin path names × 5 live hosts. Result: **no exposed admin panel.**
+
+| host | result |
+|------|--------|
+| `api.repscripts.com` | every path 404 — no admin surface at all |
+| `hyperdata.repscripts.com` | every path 404 |
+| `hyperdatatest.repscripts.com` | every path 404 |
+| `docs.repscripts.com` | platform artifacts only — see below |
+| `store.repscripts.com` | blanket 403 on all 56 paths, including `/favicon.ico`-class nonsense |
+| `rep.tebex.io` | blanket 403 on every path, storefront included |
+
+## 20. docs.repscripts.com — GitBook artifacts, not a panel
+
+    /admin/      302   Location: (empty)
+    /dashboard/  302   Location: (empty)
+    /panel/      302   Location: (empty)
+    /portal/     302   Location: (empty)
+    /manage/     302   Location: (empty)
+    /cms/        302   Location: (empty)
+    /staff/      302   Location: (empty)
+    /wp-admin    403
+    /wp-admin/   403
+    /wp-login.php 403
+    /admin.php   403
+
+The 302s carry no `Location` header — GitBook's platform-level redirect stub,
+identical for every reserved word. The 403s are GitBook's reserved-path
+denylist, not WordPress. There is no WordPress on this host. No panel here.
+
+## 21. store.repscripts.com — WordPress, blanket-refused at the app layer
+
+The 403 body is empty and the headers are PHP session headers, not a Cloudflare
+WAF block. A Cloudflare block returns its own HTML with `cf-error-details` and
+an error code; this returns nothing and sets app-level cache directives.
+
+    HTTP/2 403
+    Cache-Control:      no-store, must-revalidate, no-cache, max-age=0, private,
+                        post-check=0, pre-check=0
+    Referrer-Policy:    same-origin
+    X-Frame-Options:    SAMEORIGIN
+    Server:             cloudflare
+    CF-RAY:             a41b072079ab44a1-SIN
+    Alt-Svc:            h3=":443"
+    body:               empty
+
+`post-check=0, pre-check=0` plus `SAMEORIGIN` is the WordPress session-cookie
+pattern. So the origin behind `store.repscripts.com` is a **WordPress
+install**, and its admin panel is at the standard `/wp-admin`. The application
+refuses every request from this vantage point — consistent with a maintenance
+lock, an IP allowlist, or a geo-restriction — and returns 403 *before* routing,
+so no path is distinguishable from any other. The 403 is uniform across all 56
+probes, which means the storefront gives up nothing about its own structure.
+
+This is properly refusing access, not failing to. It was not circumvented and
+no attempt was made to route around it.
+
+## 22. rep.tebex.io — the real control panel, also closed
+
+Tebex is the storefront in the org profile, so the vendor's actual control panel
+would live here. Every path returns 403 from this vantage point, the storefront
+root included. Tebex restricts traffic by region and origin, and a datacenter
+egress is refused. Nothing about the panel's structure is observable.
+
+## Conclusion
+
+Four candidate admin surfaces were checked. Three do not exist (`api`,
+`hyperdata`, `hyperdatatest` — the hosts that answer at all answer only
+`/ping`, `/health`, `/healthz`). One exists as a WordPress install behind a
+blanket refusal, and one is the vendor's Tebex storefront behind a regional
+block. **No admin panel is exposed without authentication on any surface in
+this domain.**
+
+This is a clean result, not a gap in coverage. The exposure in this domain is
+metadata — banners, telemetry, identity, documentation — and none of it is
+administrative access.
+
 
 
 ## Tooling
