@@ -466,6 +466,200 @@ This is a clean result, not a gap in coverage. The exposure in this domain is
 metadata — banners, telemetry, identity, documentation — and none of it is
 administrative access.
 
+---
+
+# Batch five — 104.234.180.162, the origin
+
+## 23. The IP is the origin, and it is a game server host
+
+    104.234.180.162
+    AS48925  VibeGAMES B.V.
+    Singapore   1.2897, 103.8501
+    anycast     true
+    PTR         none
+
+Not the Cloudflare edge. `104.21.82.23` / `172.67.151.91` are the edge;
+`104.234.180.162` is the machine behind it, on a game-server provider in
+Singapore — the same region as the observed edge PoPs (SIN, HKG).
+
+Proof is the certificate on 443:
+
+    Subject  CN=CloudFlare Origin Certificate
+    Issuer   CloudFlare Origin SSL Certificate Authority
+    SAN      DNS:*.repscripts.com, DNS:repscripts.com
+    Valid    2026-06-08 -> 2041-06-04   (15-year origin cert)
+    Protocol TLS 1.3
+
+That is the edge→origin certificate, not a public one. The origin IP is
+discoverable and the wildcard origin cert is being served on it.
+
+## 24. Open ports — full 1–65535 sweep, 23 s
+
+    22      ssh
+    443     https   CloudFlare Origin Certificate, *.repscripts.com
+    3389    RDP
+    30120   FiveM game server
+
+Four ports. No MySQL, no Redis, no Mongo, no PostgreSQL, no RDP-adjacent SMB.
+Nothing else in 65,535.
+
+**RDP 3389 exposed to the internet on the box that serves the production API**
+is the most serious single item in this report. The same host also runs the
+game server and the `rep_hyperdata` datastore.
+
+SSH 22 accepted the connection but returned no banner within 5 s — tarpitted
+or heavily rate-limited, not a normal sshd.
+
+## 25. Origin bypass — Cloudflare's hostname isolation is an illusion
+
+Requesting the origin directly, no Cloudflare in the path, with each hostname
+in the `Host` header:
+
+    Host: api.repscripts.com            /ping    404
+    Host: api.repscripts.com            /health  200  {"connections":580,"datasets":62,...}
+    Host: hyperdata.repscripts.com      /health  200  {"connections":580,"datasets":62,...}
+    Host: hyperdatatest.repscripts.com  /health  200  {"connections":580,"datasets":62,...}
+    Host: docs.repscripts.com           /health  200  {"connections":580,"datasets":62,...}
+    Host: store.repscripts.com          /health  200  {"connections":580,"datasets":62,...}
+
+Two distinct problems in one result.
+
+**The origin ignores `Host` for vhost routing.** All five hostnames reach the
+same default vhost and get byte-identical responses. The per-hostname
+separation observed through Cloudflare does not exist at the origin.
+
+**The test hostname serves production data.** Through Cloudflare,
+`hyperdatatest.repscripts.com/health` returns `{"connections":0,"datasets":59}`.
+Directly at the origin, the same hostname returns
+`{"connections":580,"datasets":62}` — production. The prod/test split is
+enforced *only* at the Cloudflare edge, by hostname. Anything reaching the
+origin gets production, including the test hostname.
+
+Everything Cloudflare contributes here — WAF, rate limiting, DDoS
+mitigation, the origin-control the edge was providing — is removed by
+addressing the origin directly. Origin IP lockdown is the missing control.
+
+## 26. FiveM server — 201 resources, unauthenticated
+
+FiveM serves its full state on 30120 by design, no auth. That is what the
+port is for, so this is an inventory disclosure rather than a misconfiguration
+— but on the origin machine it hands over the whole stack layout.
+
+    GET http://104.234.180.162:30120/info.json      13,092 bytes, unauthenticated
+
+    sv_projectName     VTB RP
+    sv_serverId        repserver_vtbrp
+    sv_maxClients      1000
+    sv_pureLevel       2
+    onesync_enabled    true
+    enforceSteamAuth   false
+    txAdmin-version    8.0.1
+    tags               default, official, vtb, repscripts, roleplay
+    server             FXServer-no-version (didn't run build tools?)
+    version            978302382
+    resources          201
+
+`sv_serverId` is `repserver_vtbrp` and the server is publicly tagged
+`repscripts` — it is listed in the FiveM server browser under that tag.
+
+**`rep_hyperdata` is one of the loaded resources.** This corrects §4 and §6.
+`hyperdata` is not a customer name. It is a RepScripts product, deployed at
+`hyperdata.repscripts.com` (live) and `hyperdatatest.repscripts.com` (test).
+The `/health` endpoint reporting a dataset census is that product's own
+telemetry — the resource is a datastore layer, so the health route reports what
+it has open. The data was right; the mechanism was wrong.
+
+**108 of the 201 resources are `rep_*`.** The RepScripts framework *is* this
+server — the entire roleplay stack is the vendor's product:
+
+    rep_hyperdata  rep_weed  rep_rental  rep_talkNPC  rep_economy  rep_login
+    rep_police  rep_policebadge  rep_prison  rep_bank  rep_dmv  rep_farming
+    rep_fishing  rep_miner  rep_houserobbery  rep_garage  rep_vehicleshop
+    rep_shop  rep_shopbarber  rep_shopclothes  rep_clothing  rep_appearance
+    rep_gang  rep_warzone  rep_pvp  rep_airdrop  rep_auction  rep_giftcode
+    rep_safezone  rep_taixiu  rep_tattoos  rep_taxijob  rep_truckerjob
+    rep_lumberjack  rep_prospecting  rep_shipper  rep_vehiclemod  rep_builder
+    ... 108 total
+
+`docs.repscripts.com` publishes documentation for five of them
+(`rep-rental`, `rep-talkNPC`, `rep-weed`, `rep-chopshop`, and quickstart).
+The public documentation covers a small fraction of the actual product. The
+other 103 are undocumented and visible only from inside the origin.
+
+Remaining resources are the standard FiveM stack: `es_extended`, `ox_inventory`,
+`ox_lib`, `oxmysql`, `ox_doorlock`, `npwd`, `pma-voice`, `xsound`, `zdiscord`,
+`esx_status`, `esx_license`, `esx_basicneeds`, plus map and weapon assets.
+
+## 27. txAdmin — installed, and correctly not exposed
+
+`txAdmin-version 8.0.1` is present. txAdmin is the FiveM administrative
+dashboard, and it binds to loopback by default with access through the
+`txadmin` Discord command.
+
+    40120  closed
+    40121  closed
+    40122  closed
+    4040   closed
+    3306 / 5432 / 27015 / 27016   closed
+
+The admin panel is not reachable from the network. This is the one control on
+this box that is configured correctly.
+
+## 28. Telemetry trend across all five batches
+
+    t          source                        connections  datasets  uptime
+    13:25:30Z  hyperdata via Cloudflare            566         62     1024002
+    13:32:49Z  hyperdata via Cloudflare            574         62     1024441
+    13:43:42Z  ORIGIN 104.234.180.162              580         62     1026688
+
++14 connections over 18 minutes, all unauthenticated, and the last reading came
+straight off the origin with no Cloudflare in the path. `started` = 1789491524
+throughout — the process has not restarted across every observation.
+
+## 29. Topology
+
+    Cloudflare edge  104.21.82.23 / 172.67.151.91   SIN + HKG PoPs
+            |
+            v
+    ORIGIN  104.234.180.162   AS48925 VibeGAMES B.V., Singapore
+      |
+      +-- 443    nginx  ->  /health  "FiveBorn Update Server"   (rep_hyperdata)
+      |                   ->  Express "RepScripts Ban API"      (/ping, vhost-gated)
+      +-- 30120  FXServer  "VTB RP"   201 resources, 108 rep_*
+      |                   txAdmin 8.0.1 (loopback only)
+      +-- 3389   RDP     exposed to the internet
+      +-- 22     SSH     open, no banner within 5 s
+
+## Revised priority
+
+| # | finding | severity |
+|---|---------|----------|
+| 1 | **origin IP exposed, serves production to all hostnames, bypasses Cloudflare entirely** | critical |
+| 2 | **RDP 3389 open to the internet on the production origin** | critical |
+| 3 | prod/test split enforced only at the edge — origin serves prod to every Host | high |
+| 4 | unauthenticated production datastore telemetry (580 conns, 62 datasets) | high |
+| 5 | 201-resource stack inventory public on 30120, 108 undocumented rep_* products | high |
+| 6 | wildcard CORS + all mutating methods on the API | high |
+| 7 | wildcard cert, no DNS wildcard — release path for subdomains | medium |
+| 8 | full doc corpus as unauthenticated markdown | medium |
+| 9 | three real email addresses, operator identified to a named individual | medium |
+| 10 | two products on one hostname, both self-identifying | medium |
+| 11 | Helmet double-mounted, immutable cache on 404s | low |
+| 12 | no CAA, no DMARC, no security.txt | low |
+| 13 | txAdmin | correctly not exposed |
+| 14 | credentials in 1,119 files / 113 commits | none found |
+
+## Corrections to earlier batches
+
+- **§4 / §6 / §18** — `hyperdata` is a RepScripts product, not a customer.
+  The `<customer>` / `<customer>test` pattern is a
+  `<product>` / `<product>test` pattern. The dataset telemetry is
+  `rep_hyperdata`'s own health route. The 410-probe tenant sweep found no
+  hidden hosts because the names are products, not customers.
+- **§19** — the 1,248-byte `robots.txt` is Cloudflare's managed content-signal
+  stub, not a route map. No `Disallow` lines. It disclosed nothing.
+
+
 
 
 ## Tooling
